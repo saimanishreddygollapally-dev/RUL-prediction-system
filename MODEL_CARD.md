@@ -1,55 +1,93 @@
-# Model Card: RUL Prediction (LSTM + Conformal)
+# Model Card: RUL Prediction System
 
 ## Model Details
-- **Model type:** LSTM sequence-to-value regressor with MC-Dropout uncertainty
+
+- **Model type:** LSTM sequence-to-value regressor
 - **Framework:** PyTorch
-- **Version:** rul-lstm v1 (see MLflow registry)
-- **Maintainer:** Anish Hilary Ignatius
+- **Model registry:** MLflow
+- **Registered model:** `rul-lstm`
+- **Verified Production version:** 2
+- **Task:** Remaining Useful Life (RUL) prediction
+- **Additional models:** XGBoost and Temporal Convolutional Network (TCN)
 
 ## Intended Use
-- **Primary use:** Predict Remaining Useful Life (RUL) of turbofan engines
-  from multivariate operational sensor time-series
-- **Users:** Maintenance planners, reliability engineers, fleet managers
-- **Out of scope:** Real-time safety-critical control decisions (model
-  provides advisory predictions, not control signals)
+
+**Primary use:** Estimate the Remaining Useful Life of turbofan engines using multivariate operational sensor time-series data.
+
+**Intended users:** Researchers, students, reliability engineers, and maintenance-planning teams evaluating predictive-maintenance approaches.
+
+**Out of scope:** Safety-critical control decisions and use as the sole basis for real aircraft maintenance decisions.
 
 ## Training Data
-- **Dataset:** NASA C-MAPSS FD001 (run-to-failure simulation)
-- **Size:** 100 training units, ~17,700 time windows (after windowing)
-- **Features:** 14 operational sensors (constant/near-constant sensors removed)
-- **Target:** Remaining Useful Life (cycles), capped at 125
 
-## Performance Metrics
+- **Dataset:** NASA C-MAPSS FD001
+- **Data type:** Simulated turbofan engine run-to-failure trajectories
+- **Training sequences:** 17,731
+- **Test sequences:** 100
+- **Sequence length:** 30 operational cycles
+- **Input features:** 14 sensor features
+- **Prediction target:** Remaining Useful Life, measured in cycles
 
-| Model | RMSE | MAE | PHM Score | Parameters |
-|-------|------|-----|-----------|------------|
-| **LSTM** | **13.04** | **9.53** | **270.81** | 55,873 |
-| XGBoost | 15.17 | 11.15 | 378.67 | — |
-| TCN | 15.35 | 11.74 | 362.21 | 52,161 |
+## Model Performance
 
-### Uncertainty Calibration
+Recorded evaluation results from the project:
 
-| Metric | Value |
-|--------|-------|
-| Target Coverage | 90% |
-| Empirical Coverage | 94% |
-| Mean Interval Width | 44.5 cycles |
-| Conformal Quantile (q̂) | 23.03 cycles |
+| Model | RMSE | MAE | PHM Score |
+|---|---:|---:|---:|
+| LSTM | 12.94 | 9.63 | 256.94 |
+| XGBoost | 15.02 | 11.18 | 360.76 |
+| TCN | 18.92 | 14.01 | 998.23 |
 
-## Limitations
-- Trained on simulated data only (C-MAPSS), not real engine data
-- Single fault mode (HPC degradation in FD001)
-- Does not generalize to multi-condition datasets (FD002-004) without retraining
-- Uncertainty intervals assume exchangeability of calibration data
+Lower values indicate better performance for these metrics. The LSTM achieved the best results among the recorded runs.
 
-## Ethical Considerations
-- Model predictions should support, not replace, human maintenance decisions
-- False negatives (predicting long RUL for failing equipment) carry safety risk
-- The PHM08 asymmetric score penalizes late predictions more heavily, reflecting
-  this safety priority
+These results should be interpreted in the context of the dataset, preprocessing pipeline, and evaluation configuration used for each run.
+
+## Uncertainty Estimation
+
+The project uses conformal prediction to produce an interval around an RUL estimate.
+
+| Metric | Recorded value |
+|---|---:|
+| Target coverage | 90% |
+| Empirical coverage | 92% |
+| Conformal quantile | Approximately 22.27 cycles |
+| Mean interval width | Approximately 43.5 cycles |
+
+Coverage is measured on the evaluated data and is not a guarantee of future performance under distribution shift.
+
+## Deployment and Serving
+
+- FastAPI provides REST endpoints for RUL prediction, fleet prediction, health checks, and alerts.
+- MLflow tracks experiments and stores registered model versions.
+- The serving layer loads the registered Production LSTM model, with a checkpoint fallback path.
+- Streamlit provides fleet-health, model-performance, drift-monitoring, and retraining-history interfaces.
 
 ## Monitoring
-- Evidently drift detection runs via Kubernetes CronJob
-- Automated retraining triggers when dataset drift is detected
-- Champion/challenger comparison prevents regression on deployment
-- All experiments tracked in MLflow with full reproducibility
+
+Evidently is used to compare reference data with comparison data and generate a drift report.
+
+In the recorded comparison, 36 of 42 monitored features were flagged as drifted. This result describes that particular comparison and does not establish continuous monitoring of live engine sensors.
+
+The project includes a retraining-history interface. Automatic drift-triggered retraining, persistent logging of every run, and automated champion/challenger promotion should only be described as implemented once their execution has been verified.
+
+## Limitations
+
+- Trained and evaluated using simulated NASA C-MAPSS data rather than real aircraft engine telemetry.
+- Results may not generalize to other operating conditions or datasets without additional evaluation and potentially retraining.
+- Prediction intervals depend on the calibration procedure and its assumptions.
+- Dataset drift can affect model accuracy and interval reliability.
+- The system is a prototype and is not certified for operational aircraft maintenance decisions.
+
+## Ethical and Safety Considerations
+
+- Predictions should support, not replace, qualified human judgment.
+- Overestimating RUL may delay necessary maintenance and create safety risks.
+- Performance should be evaluated under realistic operating conditions before any real-world deployment.
+
+## Reproducibility
+
+The project uses Python, PyTorch, MLflow, FastAPI, Evidently, and Streamlit. Refer to the repository's README and dependency files for setup instructions and execution commands.
+
+## Author and Maintenance
+
+Update this section with the correct project maintainer(s), repository details, and the date of the latest validated model evaluation.
