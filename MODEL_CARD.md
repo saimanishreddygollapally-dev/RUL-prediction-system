@@ -90,4 +90,4 @@ The project uses Python, PyTorch, MLflow, FastAPI, Evidently, and Streamlit. Ref
 
 ## Author and Maintenance
 
-Update this section with the correct project maintainer(s), repository details, and the date of the latest validated model evaluation.
+G. sai manish reddy and Team 
