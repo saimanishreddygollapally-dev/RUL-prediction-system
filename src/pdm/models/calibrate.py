@@ -1,121 +1,196 @@
+
 """
 Calibrate conformal prediction intervals on the LSTM model.
 
 Workflow:
-    1. Load trained LSTM and test data
-    2. Split test into calibration (50%) and evaluation (50%)
-    3. Calibrate conformal predictor on calibration set
-    4. Evaluate coverage on evaluation set
-    5. Log everything to MLflow
+    1. Load trained LSTM and test data.
+    2. Split test data into calibration (50%) and evaluation (50%).
+    3. Calibrate conformal predictor on calibration data.
+    4. Evaluate coverage on held-out evaluation data.
+    5. Save the predictor and log results to MLflow.
 
-Why 50/50 split?
-- More calibration data = tighter intervals (better precision)
-- More evaluation data = more reliable coverage estimate
-- 50/50 is the standard split in conformal prediction literature
-- With 100 test units in FD001, that's 50 cal + 50 eval
+The 50/50 split is a practical choice balancing calibration
+data and evaluation data. It is not a universal standard.
 """
+
 import joblib
 import mlflow
 import numpy as np
 import torch
-from pathlib import Path
 
-from pdm.config import DEVICE, FEATURE_SENSORS, PROC, PROJECT_ROOT, RANDOM_STATE
+from pdm.config import (
+    DEVICE,
+    FEATURE_SENSORS,
+    PROC,
+    PROJECT_ROOT,
+    RANDOM_STATE,
+)
 from pdm.models.conformal import ConformalPredictor
 from pdm.models.lstm import RULLSTM
 
 
 def main(subset: str = "FD001", alpha: float = 0.10):
+
+    # Reproducibility for the calibration split
     np.random.seed(RANDOM_STATE)
 
-    # --- Load data and trained model ---
+    # --------------------------------------------------
+    # 1. Load processed test data
+    # --------------------------------------------------
     d = np.load(PROC / f"{subset}.npz")
-    Xte = torch.tensor(d["Xte"], dtype=torch.float32).to(DEVICE)
+
+    Xte = torch.tensor(
+        d["Xte"],
+        dtype=torch.float32
+    ).to(DEVICE)
+
     yte = d["yte"]
 
+    # --------------------------------------------------
+    # 2. Load trained LSTM model
+    # --------------------------------------------------
     model = RULLSTM(len(FEATURE_SENSORS)).to(DEVICE)
-    model.load_state_dict(torch.load(PROC / "lstm.pt", weights_only=True))
+
+    model.load_state_dict(
+        torch.load(
+            PROC / "lstm.pt",
+            map_location=DEVICE,
+            weights_only=True
+        )
+    )
+
     model.eval()
 
-    # --- Get predictions ---
+    # --------------------------------------------------
+    # 3. Generate predictions
+    # --------------------------------------------------
     with torch.no_grad():
-        preds = model(Xte).cpu().numpy()
+        preds = model(Xte).cpu().numpy().reshape(-1)
 
-    # --- Split into calibration and evaluation ---
+    # --------------------------------------------------
+    # 4. Split into calibration and evaluation sets
+    # --------------------------------------------------
     n = len(yte)
+
     idx = np.random.permutation(n)
+
     cal_idx = idx[:n // 2]
     eval_idx = idx[n // 2:]
 
     y_cal_true = yte[cal_idx]
     y_cal_pred = preds[cal_idx]
+
     y_eval_true = yte[eval_idx]
     y_eval_pred = preds[eval_idx]
 
     print(f"Calibration set: {len(cal_idx)} units")
     print(f"Evaluation set:  {len(eval_idx)} units")
 
-    # --- Calibrate ---
+    # --------------------------------------------------
+    # 5. Calibrate conformal predictor
+    # --------------------------------------------------
     cp = ConformalPredictor(alpha=alpha)
-    q_hat = cp.calibrate(y_cal_true, y_cal_pred)
+
+    q_hat = cp.calibrate(
+        y_cal_true,
+        y_cal_pred
+    )
+
     print(f"\nConformal quantile (q_hat): {q_hat:.2f} cycles")
-    print(f"This means intervals are +/- {q_hat:.2f} cycles around predictions")
 
-    # --- Evaluate on held-out evaluation set ---
-    eval_result = cp.evaluate_coverage(y_eval_true, y_eval_pred)
+    # --------------------------------------------------
+    # 6. Evaluate on held-out evaluation set
+    # --------------------------------------------------
+    eval_result = cp.evaluate_coverage(
+        y_eval_true,
+        y_eval_pred
+    )
 
-    print(f"\n--- Calibration Results (alpha={alpha}) ---")
-    print(f"Target coverage:    {eval_result['target_coverage']:.0%}")
-    print(f"Empirical coverage: {eval_result['empirical_coverage']:.0%}")
-    print(f"Coverage gap:       {eval_result['coverage_gap']:+.1%}")
-    print(f"Mean interval width: {eval_result['mean_interval_width']:.1f} cycles")
+    eval_intervals = cp.predict(y_eval_pred)
 
-    # --- Also evaluate on FULL test set (what goes in README) ---
-    # Re-calibrate on first half, predict for all
-    full_intervals = cp.predict(preds)
-    full_covered = (yte >= full_intervals["lower"]) & (yte <= full_intervals["upper"])
-    full_coverage = float(full_covered.mean())
+    eval_covered = (
+        (y_eval_true >= eval_intervals["lower"]) &
+        (y_eval_true <= eval_intervals["upper"])
+    )
 
-    print("\n--- Full Test Set ---")
-    print(f"Coverage (all {n} units): {full_coverage:.0%}")
-    print(f"Mean interval width:      {full_intervals['width'].mean():.1f} cycles")
+    eval_coverage = float(eval_covered.mean())
 
-    # --- Save conformal predictor for use in the API ---
-    joblib.dump(cp, PROC / "conformal.joblib")
-    print(f"\nSaved conformal predictor to {PROC / 'conformal.joblib'}")
+    mean_width = float(eval_intervals["width"].mean())
 
-    # --- Log to MLflow ---
-    # Set MLflow tracking URI to use project-relative SQLite database
+    print(f"\n--- Held-out Evaluation Results (alpha={alpha}) ---")
+    print(f"Target coverage:       {eval_result['target_coverage']:.0%}")
+    print(f"Empirical coverage:    {eval_coverage:.0%}")
+    print(f"Coverage gap:          {eval_result['coverage_gap']:+.1%}")
+    print(f"Mean interval width:   {mean_width:.2f} cycles")
+    print(f"Evaluation units:      {len(y_eval_true)}")
+
+    # --------------------------------------------------
+    # 7. Save calibrated predictor for API
+    # --------------------------------------------------
+    conformal_path = PROC / "conformal.joblib"
+
+    joblib.dump(cp, conformal_path)
+
+    print(f"\nSaved conformal predictor to {conformal_path}")
+
+    # --------------------------------------------------
+    # 8. Log results to MLflow
+    # --------------------------------------------------
     mlflow_db_path = PROJECT_ROOT / "mlflow.db"
-    mlflow.set_tracking_uri(f"sqlite:///{mlflow_db_path}")
+
+    mlflow.set_tracking_uri(
+        f"sqlite:///{mlflow_db_path}"
+    )
 
     mlflow.set_experiment("rul-cmapss")
+
     with mlflow.start_run(run_name="conformal-calibration"):
+
         mlflow.log_params({
+            "model": "LSTM",
+            "subset": subset,
             "alpha": alpha,
             "target_coverage": 1 - alpha,
             "n_calibration": len(cal_idx),
             "n_evaluation": len(eval_idx),
+            "random_state": RANDOM_STATE,
         })
+
         mlflow.log_metrics({
             "q_hat": q_hat,
-            "empirical_coverage": eval_result["empirical_coverage"],
-            "coverage_gap": eval_result["coverage_gap"],
-            "mean_interval_width": eval_result["mean_interval_width"],
-            "full_test_coverage": full_coverage,
+            "empirical_coverage": eval_coverage,
+            "coverage_gap": eval_coverage - (1 - alpha),
+            "mean_interval_width": mean_width,
         })
-        mlflow.log_artifact(str(PROC / "conformal.joblib"))
 
-    # --- Print example predictions ---
-    print("\n--- Example Predictions (first 5 units) ---")
-    print(f"{'Unit':>6s} {'True':>8s} {'Pred':>8s} {'Lower':>8s} {'Upper':>8s} {'Covered':>8s}")
-    print("-" * 52)
-    for i in range(min(5, n)):
-        covered = "✓" if full_covered[i] else "✗"
-        print(f"{i+1:6d} {yte[i]:8.1f} {preds[i]:8.1f} "
-              f"{full_intervals['lower'][i]:8.1f} "
-              f"{full_intervals['upper'][i]:8.1f} "
-              f"{covered:>8s}")
+        mlflow.log_artifact(str(conformal_path))
+
+    print("\nResults successfully logged to MLflow.")
+
+    # --------------------------------------------------
+    # 9. Print example predictions from evaluation set
+    # --------------------------------------------------
+    print("\n--- Example Predictions (first 5 evaluation units) ---")
+
+    print(
+        f"{'Unit':>6s} {'True':>8s} {'Pred':>8s} "
+        f"{'Lower':>8s} {'Upper':>8s} {'Covered':>8s}"
+    )
+
+    print("-" * 60)
+
+    for i in range(min(5, len(y_eval_true))):
+
+        covered = "Yes" if eval_covered[i] else "No"
+
+        print(
+            f"{eval_idx[i] + 1:6d} "
+            f"{y_eval_true[i]:8.1f} "
+            f"{y_eval_pred[i]:8.1f} "
+            f"{eval_intervals['lower'][i]:8.1f} "
+            f"{eval_intervals['upper'][i]:8.1f} "
+            f"{covered:>8s}"
+        )
 
 
 if __name__ == "__main__":
